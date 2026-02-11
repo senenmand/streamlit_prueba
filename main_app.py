@@ -17,33 +17,12 @@ def load_data():
 
     # Nodes
     nodes = pd.read_csv("data/EUAirTransportation_nodes.txt", sep="\s+", header=0)
-    nodes.rename(columns={nodes.columns[0]: "nodeID", nodes.columns[1]: "nodeLabel"}, inplace=True)
+    # Ya tienen nodeLong y nodeLat
+    # columns: nodeID, nodeLabel, nodeLong, nodeLat
 
     # Edges multiplex
     edges = pd.read_csv("data/EUAirTransportation_multiplex.edges", sep="\s+", header=0)
     edges.columns = ["X1.1", "X2", "layerID", "weight"]
-
-    # Aeropuertos reales
-    airports = pd.read_csv("data/airports.csv")
-    nodes = nodes.merge(
-        airports[["ident", "name", "type", "municipality", "longitude", "latitude"]],
-        left_on="nodeLabel",
-        right_on="ident",
-        how="left"
-    )
-    nodes.rename(columns={
-        "name": "airportName",
-        "type": "airportType",
-        "municipality": "city",
-        "longitude": "lon",
-        "latitude": "lat"
-    }, inplace=True)
-
-    # Filtrar aeropuertos grandes como en R
-    nodes = nodes[nodes["airportType"] == "large_airport"]
-
-    # Filtrar edges solo entre nodos grandes
-    edges = edges[edges["X1.1"].isin(nodes["nodeID"]) & edges["X2"].isin(nodes["nodeID"])]
 
     return nodes, edges, layers
 
@@ -108,13 +87,13 @@ st.subheader("🌍 Mapa de Conexiones")
 
 m = folium.Map(location=[50, 10], zoom_start=4, tiles="CartoDB positron")
 
-node_pos = nodes.set_index("nodeID")[["lat", "lon"]].to_dict("index")
+node_pos = nodes.set_index("nodeID")[["nodeLat", "nodeLong"]].to_dict("index")
 
 for _, row in edges_f.iterrows():
     src = node_pos[row["X1.1"]]
     dst = node_pos[row["X2"]]
     folium.PolyLine(
-        locations=[[src["lat"], src["lon"]], [dst["lat"], dst["lon"]]],
+        locations=[[src["nodeLat"], src["nodeLong"]], [dst["nodeLat"], dst["nodeLong"]]],
         color="blue",
         weight=1,
         opacity=0.4
