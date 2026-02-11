@@ -41,34 +41,41 @@ nodes, edges, layers = load_data()
 # ======================================================
 st.sidebar.title("🔎 Configuración")
 
-# Tipo de red
 network_type = st.sidebar.radio("Tipo de red", ["Agregada", "Por layer"])
 selected_layer = None
 if network_type == "Por layer":
     selected_layer = st.sidebar.selectbox("Seleccionar layer", layers["layerLabel"])
 
-# Selección de aeropuerto
 selected_airport = st.sidebar.selectbox(
     "Seleccionar aeropuerto",
     nodes["nodeLabel"],
     format_func=lambda x: f"{x} - {nodes.loc[nodes['nodeLabel']==x,'airportName'].values[0]}"
 )
 
-# Tipo de mapa
 map_type = st.sidebar.selectbox(
     "Estilo de mapa",
     ["CartoDB Positron", "Esri WorldImagery", "OpenStreetMap", "Stamen Toner"]
 )
 
 # ======================================================
-# FILTRADO
+# FILTRADO POR AEROPUERTO Y LAYER
 # ======================================================
 edges_f = edges.copy()
+
+# Filtrar por layer si aplica
 if network_type == "Por layer" and selected_layer:
     layer_id = layers[layers["layerLabel"] == selected_layer]["layerID"].values[0]
     edges_f = edges_f[edges_f["layerID"] == layer_id]
 
-nodes_f = nodes.copy()
+# Filtrar por aeropuerto seleccionado
+selected_id = nodes[nodes["nodeLabel"] == selected_airport]["nodeID"].values[0]
+edges_f = edges_f[(edges_f["X1.1"] == selected_id) | (edges_f["X2"] == selected_id)]
+
+# Filtrar nodos que aparecen en las aristas
+nodes_f = nodes[nodes["nodeID"].isin(edges_f["X1.1"].tolist() + edges_f["X2"].tolist())]
+
+# Diccionario de coordenadas
+node_pos = nodes_f.set_index("nodeID")[["nodeLat", "nodeLong"]].to_dict("index")
 
 # ======================================================
 # GRAFO
@@ -80,15 +87,11 @@ G = nx.from_pandas_edgelist(
     edge_attr=["weight", "layerID"]
 )
 
-# Diccionario para coordenadas
-node_pos = nodes_f.set_index("nodeID")[["nodeLat", "nodeLong"]].to_dict("index")
-
 # ======================================================
 # MAPA
 # ======================================================
-st.subheader("🌍 Mapa de Conexiones")
+st.subheader("🌍 Mapa de Conexiones Filtradas")
 
-# Mapa base
 tiles_map = {
     "CartoDB Positron": "CartoDB positron",
     "Esri WorldImagery": "Esri.WorldImagery",
@@ -97,38 +100,23 @@ tiles_map = {
 }
 m = folium.Map(location=[50, 10], zoom_start=4, tiles=tiles_map[map_type])
 
-# Agregar todas las aristas (color azul)
+# Dibujar solo las aristas filtradas
 for _, row in edges_f.iterrows():
-    src = node_pos.get(row["X1.1"])
-    dst = node_pos.get(row["X2"])
-    if src and dst:
-        folium.PolyLine(
-            locations=[[src["nodeLat"], src["nodeLong"]], [dst["nodeLat"], dst["nodeLong"]]],
-            color="blue",
-            weight=2,
-            opacity=0.5
-        ).add_to(m)
-
-# Resaltar nodo seleccionado y sus conexiones
-selected_id = nodes_f[nodes_f["nodeLabel"] == selected_airport]["nodeID"].values[0]
-
-# Aristas conectadas al nodo seleccionado (color rojo)
-for neighbor in G.neighbors(selected_id):
-    src = node_pos[selected_id]
-    dst = node_pos[neighbor]
+    src = node_pos[row["X1.1"]]
+    dst = node_pos[row["X2"]]
     folium.PolyLine(
         locations=[[src["nodeLat"], src["nodeLong"]], [dst["nodeLat"], dst["nodeLong"]]],
         color="red",
         weight=4,
-        opacity=0.9
+        opacity=0.8
     ).add_to(m)
 
-# Nodos
+# Dibujar nodos
 for idx, row in nodes_f.iterrows():
     color = "#ff0000" if row["nodeID"] == selected_id else "#ff7800"
     folium.CircleMarker(
         location=[row["nodeLat"], row["nodeLong"]],
-        radius=6 if row["nodeID"] != selected_id else 10,
+        radius=10 if row["nodeID"] == selected_id else 6,
         color="white",
         fillColor=color,
         fillOpacity=0.8,
