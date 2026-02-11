@@ -50,7 +50,7 @@ def load_data():
     layers = pd.read_csv("data/EUAirTransportation_layers.txt", sep=r'\s+')
     nodes = pd.read_csv("data/EUAirTransportation_nodes.txt", sep=r'\s+')
     edges = pd.read_csv("data/EUAirTransportation_multiplex.edges", sep=r'\s+')
-    airports = pd.read_csv("dataset/airports.csv")
+    airports = pd.read_csv("data/airports.csv")
     
     # Hacer merge con información de aeropuertos
     nodes = nodes.merge(
