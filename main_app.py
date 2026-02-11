@@ -47,10 +47,10 @@ st.set_page_config(
 def load_data():
     """Carga y prepara todos los datos necesarios"""
     # Cargar datos
-    layers = pd.read_csv("data/EUAirTransportation_layers.txt", sep=r'\s+')
-    nodes = pd.read_csv("data/EUAirTransportation_nodes.txt", sep=r'\s+')
-    edges = pd.read_csv("data/EUAirTransportation_multiplex.edges", sep=r'\s+')
-    airports = pd.read_csv("data/airports.csv")
+    layers = pd.read_csv("dataset/EUAirTransportation_layers.txt", sep=r'\s+')
+    nodes = pd.read_csv("dataset/EUAirTransportation_nodes.txt", sep=r'\s+')
+    edges = pd.read_csv("dataset/EUAirTransportation_multiplex.edges", sep=r'\s+')
+    airports = pd.read_csv("dataset/airports.csv")
     
     # Hacer merge con información de aeropuertos
     nodes = nodes.merge(
@@ -330,8 +330,11 @@ def create_map_figure(G, nodes_subset=None, edges_to_draw=None,
             lon=[G.nodes[dest_node]['lon']],
             lat=[G.nodes[dest_node]['lat']],
             mode='markers+text',
-            marker=dict(size=15, color='yellow', opacity=0.9, 
-                       line=dict(width=2, color='orange')),
+            marker=dict(
+                size=15, 
+                color='yellow', 
+                opacity=0.9
+            ),
             text=[G.nodes[dest_node]['label']],
             textposition='top center',
             textfont=dict(size=11, color='#cc9900', family='Arial Black'),
@@ -610,6 +613,12 @@ with tab3:
         # Encontrar índices
         origin_idx = nodes[nodes['nodeLabel'] == airport_origin].index[0]
         dest_idx = nodes[nodes['nodeLabel'] == airport_dest].index[0]
+        
+        # Inicializar variables
+        path_found = False
+        path = []
+        path_edges = []
+        path_layers = []
         
         # Calcular camino más corto
         try:
