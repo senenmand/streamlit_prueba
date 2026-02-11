@@ -1,77 +1,137 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import networkx as nx
+import folium
+from streamlit_folium import st_folium
 
-st.set_page_config(page_title="Visualizador de Grafo", layout="wide")
+st.set_page_config(layout="wide", page_title="EU Air Transportation Network")
 
-# --------------------------------------------------
-# Carga de datos (cacheada)
-# --------------------------------------------------
+# ======================================================
+# CARGA DE DATOS
+# ======================================================
 @st.cache_data
-def load_data(path_edges: str):
-    # Leer archivo .edges SIN cabecera
-    edges = pd.read_csv(
-        path_edges,
-        sep=r"\s+",
-        header=None
+def load_data():
+    # Layers
+    layers = pd.read_csv("data/EUAirTransportation_layers.txt", sep="\s+", header=0)
+    layers.rename(columns={layers.columns[0]: "layerID", layers.columns[1]: "layerLabel"}, inplace=True)
+
+    # Nodes
+    nodes = pd.read_csv("data/EUAirTransportation_nodes.txt", sep="\s+", header=0)
+    nodes.rename(columns={nodes.columns[0]: "nodeID", nodes.columns[1]: "nodeLabel"}, inplace=True)
+
+    # Edges multiplex
+    edges = pd.read_csv("data/EUAirTransportation_multiplex.edges", sep="\s+", header=0)
+    edges.columns = ["X1.1", "X2", "layerID", "weight"]
+
+    # Aeropuertos reales
+    airports = pd.read_csv("data/airports.csv")
+    nodes = nodes.merge(
+        airports[["ident", "name", "type", "municipality", "longitude", "latitude"]],
+        left_on="nodeLabel",
+        right_on="ident",
+        how="left"
     )
+    nodes.rename(columns={
+        "name": "airportName",
+        "type": "airportType",
+        "municipality": "city",
+        "longitude": "lon",
+        "latitude": "lat"
+    }, inplace=True)
 
-    # Asignar nombres de columnas de forma segura
-    edges.columns = ["src", "dst", "attr", "weight"][:len(edges.columns)]
+    # Filtrar aeropuertos grandes como en R
+    nodes = nodes[nodes["airportType"] == "large_airport"]
 
-    # Crear nodos únicos a partir de src y dst
-    nodes = pd.DataFrame(
-        pd.unique(edges[["src", "dst"]].values.ravel()),
-        columns=["node"]
-    )
+    # Filtrar edges solo entre nodos grandes
+    edges = edges[edges["X1.1"].isin(nodes["nodeID"]) & edges["X2"].isin(nodes["nodeID"])]
 
-    # Asignar IDs consecutivos
-    nodes["nodeID"] = np.arange(len(nodes))
+    return nodes, edges, layers
 
-    # Mapeo nodo → ID
-    node_map = dict(zip(nodes["node"], nodes["nodeID"]))
+nodes, edges, layers = load_data()
 
-    # Reemplazar valores por nodeID
-    edges["src_id"] = edges["src"].map(node_map)
-    edges["dst_id"] = edges["dst"].map(node_map)
+# ======================================================
+# SIDEBAR
+# ======================================================
+st.sidebar.title("🔎 Configuración")
 
-    # Filtrar posibles NaN (por seguridad)
-    edges = edges.dropna(subset=["src_id", "dst_id"])
-
-    return nodes, edges
-
-
-# --------------------------------------------------
-# Streamlit UI
-# --------------------------------------------------
-st.title("📊 Visualización de Grafo (.edges)")
-
-path_edges = st.text_input(
-    "Ruta del archivo .edges",
-    value="archivo.edges"
+network_type = st.sidebar.radio(
+    "Tipo de red",
+    ["Agregada", "Por layer"]
 )
 
-if path_edges:
-    try:
-        nodes, edges = load_data(path_edges)
+selected_layer = None
+if network_type == "Por layer":
+    selected_layer = st.sidebar.selectbox(
+        "Seleccionar layer",
+        layers["layerLabel"]
+    )
 
-        st.subheader("Nodos")
-        st.dataframe(nodes.head())
+selected_nodes = st.sidebar.multiselect(
+    "Filtrar aeropuertos",
+    nodes["nodeLabel"],
+    default=nodes["nodeLabel"].tolist()
+)
 
-        st.subheader("Aristas")
-        st.dataframe(edges.head())
+# ======================================================
+# FILTRADO
+# ======================================================
+edges_f = edges[edges["X1.1"].isin(nodes["nodeID"]) & edges["X2"].isin(nodes["nodeID"])]
 
-        # Crear grafo
-        G = nx.from_pandas_edgelist(
-            edges,
-            source="src_id",
-            target="dst_id",
-            edge_attr=True
-        )
+if selected_layer is not None:
+    layer_id = layers[layers["layerLabel"] == selected_layer]["layerID"].values[0]
+    edges_f = edges_f[edges_f["layerID"] == layer_id]
 
-        st.success(f"Grafo cargado: {G.number_of_nodes()} nodos, {G.number_of_edges()} aristas")
+# ======================================================
+# GRAFO
+# ======================================================
+G = nx.from_pandas_edgelist(
+    edges_f,
+    source="X1.1",
+    target="X2",
+    edge_attr=["weight", "layerID"]
+)
 
-    except Exception as e:
-        st.error("Error al cargar el archivo")
-        st.exception(e)
+# ======================================================
+# METRICAS
+# ======================================================
+st.title("✈️ EU Air Transportation Network")
+
+c1, c2, c3 = st.columns(3)
+c1.metric("Nodos", G.number_of_nodes())
+c2.metric("Aristas", G.number_of_edges())
+c3.metric("Layers activas", edges_f["layerID"].nunique())
+
+# ======================================================
+# MAPA
+# ======================================================
+st.subheader("🌍 Mapa de Conexiones")
+
+m = folium.Map(location=[50, 10], zoom_start=4, tiles="CartoDB positron")
+
+node_pos = nodes.set_index("nodeID")[["lat", "lon"]].to_dict("index")
+
+for _, row in edges_f.iterrows():
+    src = node_pos[row["X1.1"]]
+    dst = node_pos[row["X2"]]
+    folium.PolyLine(
+        locations=[[src["lat"], src["lon"]], [dst["lat"], dst["lon"]]],
+        color="blue",
+        weight=1,
+        opacity=0.4
+    ).add_to(m)
+
+st_folium(m, width=1200, height=600)
+
+# ======================================================
+# TABLAS
+# ======================================================
+tab1, tab2, tab3 = st.tabs(["Nodos", "Aristas", "Layers"])
+
+with tab1:
+    st.dataframe(nodes)
+
+with tab2:
+    st.dataframe(edges_f)
+
+with tab3:
+    st.dataframe(layers)
