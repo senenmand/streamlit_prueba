@@ -47,10 +47,10 @@ st.set_page_config(
 def load_data():
     """Carga y prepara todos los datos necesarios"""
     # Cargar datos
-    layers = pd.read_csv("dataset/EUAirTransportation_layers.txt", sep=r'\s+')
-    nodes = pd.read_csv("dataset/EUAirTransportation_nodes.txt", sep=r'\s+')
-    edges = pd.read_csv("dataset/EUAirTransportation_multiplex.edges", sep=r'\s+')
-    airports = pd.read_csv("dataset/airports.csv")
+    layers = pd.read_csv("data/EUAirTransportation_layers.txt", sep=r'\s+')
+    nodes = pd.read_csv("data/EUAirTransportation_nodes.txt", sep=r'\s+')
+    edges = pd.read_csv("data/EUAirTransportation_multiplex.edges", sep=r'\s+')
+    airports = pd.read_csv("data/airports.csv")
     
     # Hacer merge con información de aeropuertos
     nodes = nodes.merge(
