@@ -1,4 +1,7 @@
-streamlit
-pandas
-seaborn
-matplotlib
+streamlit>=1.30
+pandas>=2.0
+numpy>=1.24
+networkx>=3.0
+folium>=0.15
+streamlit-folium>=0.18
+pydeck>=0.8
