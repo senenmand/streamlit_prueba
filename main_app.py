@@ -1,36 +1,33 @@
 """
 Dashboard Interactivo de Red de Aeropuertos Europeos
-Migrado de R/Shiny a Python/Dash
+Implementado con Streamlit
 """
 
-import dash
-from dash import dcc, html, Input, Output, State
-import dash_bootstrap_components as dbc
-import plotly.graph_objects as go
+import streamlit as st
 import pandas as pd
 import numpy as np
 import networkx as nx
 from scipy.sparse import csr_matrix
+import plotly.graph_objects as go
 import warnings
 warnings.filterwarnings('ignore')
 
 # ============================================================================
-# CONFIGURACIÓN INICIAL
+# CONFIGURACIÓN DE LA PÁGINA
 # ============================================================================
 
-# Inicializar la aplicación Dash con tema Bootstrap
-app = dash.Dash(
-    __name__,
-    external_stylesheets=[dbc.themes.COSMO],
-    suppress_callback_exceptions=True
+st.set_page_config(
+    page_title="Dashboard de Aeropuertos Europeos",
+    page_icon="✈️",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-app.title = "Dashboard de Aeropuertos Europeos"
-
 # ============================================================================
-# FUNCIONES AUXILIARES PARA GRAFOS
+# FUNCIONES DE CARGA Y PREPARACIÓN DE DATOS
 # ============================================================================
 
+@st.cache_data
 def load_data():
     """Carga y prepara todos los datos necesarios"""
     # Cargar datos
@@ -76,15 +73,16 @@ def load_data():
     return layers, nodes, edges
 
 
-def create_layer_graphs(nodes, edges, num_layers):
+@st.cache_resource
+def create_layer_graphs(_nodes, _edges, num_layers):
     """Crea un grafo para cada capa (aerolínea)"""
     graphs = {}
     adjacency_matrices = {}
-    num_nodes = len(nodes)
+    num_nodes = len(_nodes)
     
     for layer_id in range(1, num_layers + 1):
         # Filtrar aristas de esta capa
-        layer_edges = edges[edges['layer'] == layer_id]
+        layer_edges = _edges[_edges['layer'] == layer_id]
         
         # Crear grafo de NetworkX
         G = nx.Graph()
@@ -94,7 +92,7 @@ def create_layer_graphs(nodes, edges, num_layers):
             G.add_edge(int(row['node1']), int(row['node2']), weight=row['weight'])
         
         # Añadir atributos de nodos
-        for idx, node_row in nodes.iterrows():
+        for idx, node_row in _nodes.iterrows():
             G.nodes[idx]['lon'] = node_row['nodeLong']
             G.nodes[idx]['lat'] = node_row['nodeLat']
             G.nodes[idx]['label'] = node_row['nodeLabel']
@@ -110,14 +108,15 @@ def create_layer_graphs(nodes, edges, num_layers):
     return graphs, adjacency_matrices
 
 
-def create_aggregate_graph(graphs, nodes):
+@st.cache_resource
+def create_aggregate_graph(_graphs, _nodes):
     """Crea el grafo agregado combinando todas las capas"""
     G_agg = nx.Graph()
-    num_nodes = len(nodes)
+    num_nodes = len(_nodes)
     G_agg.add_nodes_from(range(num_nodes))
     
     # Combinar aristas de todos los grafos
-    for G in graphs.values():
+    for G in _graphs.values():
         for u, v, data in G.edges(data=True):
             if G_agg.has_edge(u, v):
                 G_agg[u][v]['weight'] += data.get('weight', 1)
@@ -125,7 +124,7 @@ def create_aggregate_graph(graphs, nodes):
                 G_agg.add_edge(u, v, weight=data.get('weight', 1))
     
     # Añadir atributos de nodos
-    for idx, node_row in nodes.iterrows():
+    for idx, node_row in _nodes.iterrows():
         G_agg.nodes[idx]['lon'] = node_row['nodeLong']
         G_agg.nodes[idx]['lat'] = node_row['nodeLat']
         G_agg.nodes[idx]['label'] = node_row['nodeLabel']
@@ -135,29 +134,26 @@ def create_aggregate_graph(graphs, nodes):
     return G_agg
 
 
+# ============================================================================
+# FUNCIONES AUXILIARES
+# ============================================================================
+
 def calculate_pagerank(adj_matrix):
     """Calcula PageRank usando la matriz de adyacencia"""
-    # Convertir a NetworkX graph
     G = nx.from_scipy_sparse_array(adj_matrix)
-    
-    # Calcular PageRank
     pr = nx.pagerank(G, alpha=0.85)
-    
-    # Convertir a array
     pr_array = np.array([pr.get(i, 0) for i in range(adj_matrix.shape[0])])
-    
     return pr_array
 
 
-def get_path_layers(path_nodes, edges):
+def get_path_layers(path_nodes, edges_df):
     """Obtiene las capas (aerolíneas) usadas en un camino"""
     layers = []
     for i in range(len(path_nodes) - 1):
         n1, n2 = path_nodes[i], path_nodes[i + 1]
-        # Buscar la arista en el dataframe
-        edge_row = edges[
-            ((edges['node1'] == n1) & (edges['node2'] == n2)) |
-            ((edges['node1'] == n2) & (edges['node2'] == n1))
+        edge_row = edges_df[
+            ((edges_df['node1'] == n1) & (edges_df['node2'] == n2)) |
+            ((edges_df['node1'] == n2) & (edges_df['node2'] == n1))
         ]
         if not edge_row.empty:
             layers.append(int(edge_row.iloc[0]['layer']))
@@ -173,24 +169,12 @@ def get_path_layers(path_nodes, edges):
 def create_map_figure(G, nodes_subset=None, edges_to_draw=None, 
                      origin_node=None, dest_node=None, path_edges=None,
                      pagerank_values=None, mapbox_style='open-street-map'):
-    """
-    Crea una figura de mapa con Plotly
-    
-    Parameters:
-    - G: grafo de NetworkX
-    - nodes_subset: lista de nodos a dibujar (None = todos)
-    - edges_to_draw: lista de tuplas (u, v) para dibujar aristas
-    - origin_node: nodo de origen (marcado en rojo)
-    - dest_node: nodo de destino (marcado en amarillo)
-    - path_edges: aristas del camino más corto (dibujadas en azul)
-    - pagerank_values: valores de PageRank para dimensionar nodos
-    - mapbox_style: estilo del mapa
-    """
+    """Crea una figura de mapa con Plotly"""
     
     # Mapeo de estilos
     style_map = {
         'CartoDB.Positron': 'carto-positron',
-        'Esri.WorldImagery': 'satellite',
+        'Esri.WorldImagery': 'satellite-streets',
         'OpenStreetMap': 'open-street-map',
         'Stadia.AlidadeSmooth': 'stamen-terrain'
     }
@@ -206,25 +190,21 @@ def create_map_figure(G, nodes_subset=None, edges_to_draw=None,
     # Filtrar nodos que tienen grado > 0
     nodes_with_edges = [n for n in nodes_subset if G.degree(n) > 0]
     
-    # Dibujar aristas
-    edge_traces = []
-    
-    # Aristas normales
+    # Dibujar aristas normales
     if edges_to_draw is not None:
         for u, v in edges_to_draw:
             if u in G.nodes() and v in G.nodes():
                 x0, y0 = G.nodes[u]['lon'], G.nodes[u]['lat']
                 x1, y1 = G.nodes[v]['lon'], G.nodes[v]['lat']
                 
-                edge_trace = go.Scattermapbox(
+                fig.add_trace(go.Scattermapbox(
                     lon=[x0, x1, None],
                     lat=[y0, y1, None],
                     mode='lines',
                     line=dict(width=1, color='rgba(51, 136, 255, 0.3)'),
                     hoverinfo='skip',
                     showlegend=False
-                )
-                edge_traces.append(edge_trace)
+                ))
     else:
         # Dibujar todas las aristas del subgrafo
         for u, v in G.edges():
@@ -232,15 +212,14 @@ def create_map_figure(G, nodes_subset=None, edges_to_draw=None,
                 x0, y0 = G.nodes[u]['lon'], G.nodes[u]['lat']
                 x1, y1 = G.nodes[v]['lon'], G.nodes[v]['lat']
                 
-                edge_trace = go.Scattermapbox(
+                fig.add_trace(go.Scattermapbox(
                     lon=[x0, x1, None],
                     lat=[y0, y1, None],
                     mode='lines',
                     line=dict(width=1, color='rgba(51, 136, 255, 0.3)'),
                     hoverinfo='skip',
                     showlegend=False
-                )
-                edge_traces.append(edge_trace)
+                ))
     
     # Aristas del camino (si existen)
     if path_edges is not None:
@@ -248,7 +227,7 @@ def create_map_figure(G, nodes_subset=None, edges_to_draw=None,
             x0, y0 = G.nodes[u]['lon'], G.nodes[u]['lat']
             x1, y1 = G.nodes[v]['lon'], G.nodes[v]['lat']
             
-            path_trace = go.Scattermapbox(
+            fig.add_trace(go.Scattermapbox(
                 lon=[x0, x1, None],
                 lat=[y0, y1, None],
                 mode='lines',
@@ -256,12 +235,7 @@ def create_map_figure(G, nodes_subset=None, edges_to_draw=None,
                 hoverinfo='text',
                 text=f"Tramo {i+1}",
                 showlegend=False
-            )
-            edge_traces.append(path_trace)
-    
-    # Añadir todas las aristas
-    for trace in edge_traces:
-        fig.add_trace(trace)
+            ))
     
     # Preparar datos de nodos
     node_lons = []
@@ -271,15 +245,12 @@ def create_map_figure(G, nodes_subset=None, edges_to_draw=None,
     node_sizes = []
     
     for node in nodes_with_edges:
-        if node == origin_node:
-            continue  # Lo dibujamos después
-        if node == dest_node:
-            continue  # Lo dibujamos después
+        if node == origin_node or node == dest_node:
+            continue
             
         node_lons.append(G.nodes[node]['lon'])
         node_lats.append(G.nodes[node]['lat'])
         
-        # Texto del hover
         text = (f"<b>{G.nodes[node]['label']}</b><br>"
                 f"{G.nodes[node]['airport_name']}<br>"
                 f"{G.nodes[node]['city']}<br>"
@@ -292,7 +263,6 @@ def create_map_figure(G, nodes_subset=None, edges_to_draw=None,
         
         # Color y tamaño
         if pagerank_values is not None:
-            # Color y tamaño basado en PageRank
             pr_norm = (pagerank_values[node] - pagerank_values.min()) / \
                      (pagerank_values.max() - pagerank_values.min() + 1e-10)
             node_colors.append(f'rgba(255, 0, 0, {0.3 + 0.7 * pr_norm})')
@@ -303,7 +273,7 @@ def create_map_figure(G, nodes_subset=None, edges_to_draw=None,
     
     # Nodos normales
     if node_lons:
-        node_trace = go.Scattermapbox(
+        fig.add_trace(go.Scattermapbox(
             lon=node_lons,
             lat=node_lats,
             mode='markers+text',
@@ -319,12 +289,11 @@ def create_map_figure(G, nodes_subset=None, edges_to_draw=None,
             hoverinfo='text',
             hovertext=node_texts,
             showlegend=False
-        )
-        fig.add_trace(node_trace)
+        ))
     
     # Nodo de origen (rojo)
     if origin_node is not None and origin_node in G.nodes():
-        origin_trace = go.Scattermapbox(
+        fig.add_trace(go.Scattermapbox(
             lon=[G.nodes[origin_node]['lon']],
             lat=[G.nodes[origin_node]['lat']],
             mode='markers+text',
@@ -337,12 +306,11 @@ def create_map_figure(G, nodes_subset=None, edges_to_draw=None,
                       f"{G.nodes[origin_node]['airport_name']}<br>"
                       f"{G.nodes[origin_node]['city']}"),
             showlegend=False
-        )
-        fig.add_trace(origin_trace)
+        ))
     
     # Nodo de destino (amarillo)
     if dest_node is not None and dest_node in G.nodes():
-        dest_trace = go.Scattermapbox(
+        fig.add_trace(go.Scattermapbox(
             lon=[G.nodes[dest_node]['lon']],
             lat=[G.nodes[dest_node]['lat']],
             mode='markers+text',
@@ -356,8 +324,7 @@ def create_map_figure(G, nodes_subset=None, edges_to_draw=None,
                       f"{G.nodes[dest_node]['airport_name']}<br>"
                       f"{G.nodes[dest_node]['city']}"),
             showlegend=False
-        )
-        fig.add_trace(dest_trace)
+        ))
     
     # Configuración del mapa
     fig.update_layout(
@@ -375,478 +342,395 @@ def create_map_figure(G, nodes_subset=None, edges_to_draw=None,
 
 
 # ============================================================================
-# CARGAR DATOS AL INICIO
+# CARGAR DATOS
 # ============================================================================
 
-print("Cargando datos...")
-layers, nodes, edges = load_data()
-num_layers = len(layers)
-num_nodes = len(nodes)
-
-print("Creando grafos por capa...")
-layer_graphs, adjacency_matrices = create_layer_graphs(nodes, edges, num_layers)
-
-print("Creando grafo agregado...")
-G_agg = create_aggregate_graph(layer_graphs, nodes)
-
-print(f"Datos cargados: {num_nodes} aeropuertos, {num_layers} aerolíneas")
-
-# ============================================================================
-# LAYOUT DEL DASHBOARD
-# ============================================================================
-
-# Crear opciones para los selectores
-airline_options = [{'label': row['nodeLabel'], 'value': i+1} 
-                   for i, row in layers.iterrows()]
-
-airport_options = [
-    {'label': f"{row['nodeLabel']} - {row['airportName']}", 'value': row['nodeLabel']}
-    for _, row in nodes.iterrows()
-]
-
-map_style_options = [
-    {'label': 'Minimalista', 'value': 'CartoDB.Positron'},
-    {'label': 'Satélite', 'value': 'Esri.WorldImagery'},
-    {'label': 'Callejero', 'value': 'OpenStreetMap'},
-    {'label': 'Suave', 'value': 'Stadia.AlidadeSmooth'}
-]
-
-# Layout principal con pestañas
-app.layout = dbc.Container([
-    html.H1("Dashboard de Red de Aeropuertos Europeos", 
-            className="text-center my-4"),
+# Mostrar spinner mientras carga
+with st.spinner('Cargando datos...'):
+    layers, nodes, edges = load_data()
+    num_layers = len(layers)
+    num_nodes = len(nodes)
     
-    dbc.Tabs([
-        # ========== PESTAÑA 1: VISTA GENERAL ==========
-        dbc.Tab(label="Vista General", children=[
-            dbc.Row([
-                dbc.Col([
-                    html.H4("Configuración", className="mt-3"),
-                    html.Hr(),
-                    
-                    html.Label("Tipo de red:"),
-                    dcc.Dropdown(
-                        id='layer-type-general',
-                        options=[
-                            {'label': 'Agregada (todas las aerolíneas)', 'value': 'aggregated'},
-                            {'label': 'Por aerolínea individual', 'value': 'layer'}
-                        ],
-                        value='aggregated',
-                        clearable=False
-                    ),
-                    
-                    html.Div(id='airline-selector-general', children=[
-                        html.Label("Seleccionar aerolínea:", className="mt-3"),
-                        dcc.Dropdown(
-                            id='layer-select-general',
-                            options=airline_options,
-                            value=1,
-                            clearable=False
-                        )
-                    ], style={'display': 'none'}),
-                    
-                    html.Hr(),
-                    html.H4("Estilo de Mapa", className="mt-3"),
-                    dcc.Dropdown(
-                        id='map-style-general',
-                        options=map_style_options,
-                        value='CartoDB.Positron',
-                        clearable=False
-                    )
-                ], width=3),
-                
-                dbc.Col([
-                    html.H4("Red Completa de Aeropuertos Europeos", className="mt-3"),
-                    dcc.Graph(id='map-general', style={'height': '600px'})
-                ], width=9)
-            ])
-        ]),
-        
-        # ========== PESTAÑA 2: ANÁLISIS DE RED ==========
-        dbc.Tab(label="Análisis de Red", children=[
-            dbc.Row([
-                dbc.Col([
-                    html.H4("Configuración", className="mt-3"),
-                    html.Hr(),
-                    
-                    html.Label("Tipo de red:"),
-                    dcc.Dropdown(
-                        id='layer-type-analisis',
-                        options=[
-                            {'label': 'Agregada (todas las aerolíneas)', 'value': 'aggregated'},
-                            {'label': 'Por aerolínea individual', 'value': 'layer'}
-                        ],
-                        value='aggregated',
-                        clearable=False
-                    ),
-                    
-                    html.Div(id='airline-selector-analisis', children=[
-                        html.Label("Seleccionar aerolínea:", className="mt-3"),
-                        dcc.Dropdown(
-                            id='layer-select-analisis',
-                            options=airline_options,
-                            value=1,
-                            clearable=False
-                        )
-                    ], style={'display': 'none'}),
-                    
-                    html.Label("Aeropuerto de origen:", className="mt-3"),
-                    dcc.Dropdown(
-                        id='airport-select-analisis',
-                        options=airport_options,
-                        value=nodes.iloc[0]['nodeLabel'],
-                        clearable=False
-                    ),
-                    
-                    html.Hr(),
-                    html.H4("Estadísticas de la Red"),
-                    html.Pre(id='stats-analisis', style={'fontSize': '12px'}),
-                    
-                    html.Hr(),
-                    html.H4("Info del Aeropuerto"),
-                    html.Pre(id='airport-info-analisis', style={'fontSize': '12px'}),
-                    
-                    html.Hr(),
-                    html.H4("Estilo de Mapa"),
-                    dcc.Dropdown(
-                        id='map-style-analisis',
-                        options=map_style_options,
-                        value='CartoDB.Positron',
-                        clearable=False
-                    )
-                ], width=3),
-                
-                dbc.Col([
-                    html.H4("Visualización de la Red de Aeropuertos", className="mt-3"),
-                    dcc.Graph(id='map-analisis', style={'height': '600px'})
-                ], width=9)
-            ])
-        ]),
-        
-        # ========== PESTAÑA 3: CONEXIONES ==========
-        dbc.Tab(label="Conexiones", children=[
-            dbc.Row([
-                dbc.Col([
-                    html.H4("Configuración", className="mt-3"),
-                    html.Hr(),
-                    
-                    html.Label("Tipo de red:"),
-                    dcc.Dropdown(
-                        id='layer-type-conexiones',
-                        options=[
-                            {'label': 'Agregada (todas las aerolíneas)', 'value': 'aggregated'},
-                            {'label': 'Por aerolínea individual', 'value': 'layer'}
-                        ],
-                        value='aggregated',
-                        clearable=False
-                    ),
-                    
-                    html.Div(id='airline-selector-conexiones', children=[
-                        html.Label("Seleccionar aerolínea:", className="mt-3"),
-                        dcc.Dropdown(
-                            id='layer-select-conexiones',
-                            options=airline_options,
-                            value=1,
-                            clearable=False
-                        )
-                    ], style={'display': 'none'}),
-                    
-                    html.Label("Aeropuerto de origen:", className="mt-3"),
-                    dcc.Dropdown(
-                        id='airport-origin-conexiones',
-                        options=airport_options,
-                        value=nodes.iloc[0]['nodeLabel'],
-                        clearable=False
-                    ),
-                    
-                    html.Label("Aeropuerto de destino:", className="mt-3"),
-                    dcc.Dropdown(
-                        id='airport-dest-conexiones',
-                        options=airport_options,
-                        value=nodes.iloc[1]['nodeLabel'] if len(nodes) > 1 else nodes.iloc[0]['nodeLabel'],
-                        clearable=False
-                    ),
-                    
-                    html.Hr(),
-                    html.H4("Info del Trayecto"),
-                    html.Div(id='path-info-conexiones', style={'fontSize': '12px'}),
-                    
-                    html.Hr(),
-                    html.H4("Estilo de Mapa"),
-                    dcc.Dropdown(
-                        id='map-style-conexiones',
-                        options=map_style_options,
-                        value='CartoDB.Positron',
-                        clearable=False
-                    )
-                ], width=3),
-                
-                dbc.Col([
-                    html.H4("Mapa de Rutas", className="mt-3"),
-                    dcc.Graph(id='map-conexiones', style={'height': '600px'})
-                ], width=9)
-            ])
-        ]),
-        
-        # ========== PESTAÑA 4: PAGERANK ==========
-        dbc.Tab(label="PageRank", children=[
-            dbc.Row([
-                dbc.Col([
-                    html.H4("Configuración", className="mt-3"),
-                    html.Hr(),
-                    
-                    html.Label("Seleccionar aerolínea:"),
-                    dcc.Dropdown(
-                        id='layer-select-pagerank',
-                        options=airline_options,
-                        value=1,
-                        clearable=False
-                    ),
-                    
-                    html.Hr(),
-                    html.H4("Estadísticas de PageRank"),
-                    html.Pre(id='stats-pagerank', style={'fontSize': '12px'}),
-                    
-                    html.Hr(),
-                    html.H4("Estilo de Mapa"),
-                    dcc.Dropdown(
-                        id='map-style-pagerank',
-                        options=map_style_options,
-                        value='CartoDB.Positron',
-                        clearable=False
-                    )
-                ], width=3),
-                
-                dbc.Col([
-                    html.H4("Visualización de PageRank por Aerolínea", className="mt-3"),
-                    dcc.Graph(id='map-pagerank', style={'height': '600px'})
-                ], width=9)
-            ])
-        ])
-    ])
-], fluid=True)
+    layer_graphs, adjacency_matrices = create_layer_graphs(nodes, edges, num_layers)
+    G_agg = create_aggregate_graph(layer_graphs, nodes)
 
 # ============================================================================
-# CALLBACKS
+# INTERFAZ PRINCIPAL
 # ============================================================================
 
-# Callback para mostrar/ocultar selector de aerolínea en Vista General
-@app.callback(
-    Output('airline-selector-general', 'style'),
-    Input('layer-type-general', 'value')
-)
-def toggle_airline_selector_general(layer_type):
-    if layer_type == 'layer':
-        return {'display': 'block'}
-    return {'display': 'none'}
+# Título principal
+st.title("✈️ Dashboard de Red de Aeropuertos Europeos")
+st.markdown("---")
 
+# Crear pestañas
+tab1, tab2, tab3, tab4 = st.tabs([
+    "🌍 Vista General", 
+    "📊 Análisis de Red", 
+    "🛫 Conexiones", 
+    "⭐ PageRank"
+])
 
-# Callback para mostrar/ocultar selector de aerolínea en Análisis
-@app.callback(
-    Output('airline-selector-analisis', 'style'),
-    Input('layer-type-analisis', 'value')
-)
-def toggle_airline_selector_analisis(layer_type):
-    if layer_type == 'layer':
-        return {'display': 'block'}
-    return {'display': 'none'}
+# ============================================================================
+# PESTAÑA 1: VISTA GENERAL
+# ============================================================================
 
+with tab1:
+    st.header("Red Completa de Aeropuertos Europeos")
+    
+    col1, col2 = st.columns([1, 3])
+    
+    with col1:
+        st.subheader("Configuración")
+        
+        layer_type_general = st.radio(
+            "Tipo de red:",
+            options=['aggregated', 'layer'],
+            format_func=lambda x: 'Agregada (todas las aerolíneas)' if x == 'aggregated' else 'Por aerolínea individual',
+            key='layer_type_general'
+        )
+        
+        if layer_type_general == 'layer':
+            layer_select_general = st.selectbox(
+                "Seleccionar aerolínea:",
+                options=range(1, num_layers + 1),
+                format_func=lambda x: layers.iloc[x-1]['nodeLabel'],
+                key='layer_select_general'
+            )
+        
+        st.markdown("---")
+        st.subheader("Estilo de Mapa")
+        map_style_general = st.selectbox(
+            "Seleccionar estilo:",
+            options=['CartoDB.Positron', 'Esri.WorldImagery', 'OpenStreetMap', 'Stadia.AlidadeSmooth'],
+            format_func=lambda x: {
+                'CartoDB.Positron': 'Minimalista',
+                'Esri.WorldImagery': 'Satélite',
+                'OpenStreetMap': 'Callejero',
+                'Stadia.AlidadeSmooth': 'Suave'
+            }[x],
+            key='map_style_general'
+        )
+    
+    with col2:
+        # Seleccionar grafo
+        if layer_type_general == 'aggregated':
+            G = G_agg
+        else:
+            G = layer_graphs[layer_select_general]
+            # Filtrar nodos sin conexiones
+            nodes_with_edges = [n for n in G.nodes() if G.degree(n) > 0]
+            G = G.subgraph(nodes_with_edges).copy()
+        
+        # Crear y mostrar mapa
+        fig = create_map_figure(G, mapbox_style=map_style_general)
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Estadísticas
+        col_a, col_b, col_c, col_d = st.columns(4)
+        with col_a:
+            st.metric("Nodos totales", G.number_of_nodes())
+        with col_b:
+            st.metric("Conexiones totales", G.number_of_edges())
+        with col_c:
+            st.metric("Densidad", f"{nx.density(G):.4f}")
+        with col_d:
+            st.metric("Componentes", nx.number_connected_components(G))
 
-# Callback para mostrar/ocultar selector de aerolínea en Conexiones
-@app.callback(
-    Output('airline-selector-conexiones', 'style'),
-    Input('layer-type-conexiones', 'value')
-)
-def toggle_airline_selector_conexiones(layer_type):
-    if layer_type == 'layer':
-        return {'display': 'block'}
-    return {'display': 'none'}
+# ============================================================================
+# PESTAÑA 2: ANÁLISIS DE RED
+# ============================================================================
 
+with tab2:
+    st.header("Visualización de la Red de Aeropuertos")
+    
+    col1, col2 = st.columns([1, 3])
+    
+    with col1:
+        st.subheader("Configuración")
+        
+        layer_type_analisis = st.radio(
+            "Tipo de red:",
+            options=['aggregated', 'layer'],
+            format_func=lambda x: 'Agregada (todas las aerolíneas)' if x == 'aggregated' else 'Por aerolínea individual',
+            key='layer_type_analisis'
+        )
+        
+        if layer_type_analisis == 'layer':
+            layer_select_analisis = st.selectbox(
+                "Seleccionar aerolínea:",
+                options=range(1, num_layers + 1),
+                format_func=lambda x: layers.iloc[x-1]['nodeLabel'],
+                key='layer_select_analisis'
+            )
+        
+        # Selector de aeropuerto
+        airport_options = [(row['nodeLabel'], f"{row['nodeLabel']} - {row['airportName']}") 
+                          for _, row in nodes.iterrows()]
+        
+        airport_select = st.selectbox(
+            "Aeropuerto de origen:",
+            options=[x[0] for x in airport_options],
+            format_func=lambda x: next(y[1] for y in airport_options if y[0] == x),
+            key='airport_select_analisis'
+        )
+        
+        st.markdown("---")
+        st.subheader("Estadísticas de la Red")
+        
+        # Seleccionar grafo
+        if layer_type_analisis == 'aggregated':
+            G_analisis = G_agg
+        else:
+            G_analisis = layer_graphs[layer_select_analisis]
+        
+        st.text(f"Nodos totales: {G_analisis.number_of_nodes()}")
+        st.text(f"Conexiones totales: {G_analisis.number_of_edges()}")
+        st.text(f"Densidad: {nx.density(G_analisis):.4f}")
+        st.text(f"Componentes conectados: {nx.number_connected_components(G_analisis)}")
+        
+        st.markdown("---")
+        st.subheader("Info del Aeropuerto")
+        
+        airport_idx = nodes[nodes['nodeLabel'] == airport_select].index[0]
+        
+        if airport_idx in G_analisis.nodes():
+            st.text(f"Código: {airport_select}")
+            st.text(f"Nombre: {G_analisis.nodes[airport_idx]['airport_name']}")
+            st.text(f"Ciudad: {G_analisis.nodes[airport_idx]['city']}")
+            st.text(f"Conexiones directas: {G_analisis.degree(airport_idx)}")
+        else:
+            st.warning("Aeropuerto no encontrado en esta red")
+        
+        st.markdown("---")
+        st.subheader("Estilo de Mapa")
+        map_style_analisis = st.selectbox(
+            "Seleccionar estilo:",
+            options=['CartoDB.Positron', 'Esri.WorldImagery', 'OpenStreetMap', 'Stadia.AlidadeSmooth'],
+            format_func=lambda x: {
+                'CartoDB.Positron': 'Minimalista',
+                'Esri.WorldImagery': 'Satélite',
+                'OpenStreetMap': 'Callejero',
+                'Stadia.AlidadeSmooth': 'Suave'
+            }[x],
+            key='map_style_analisis'
+        )
+    
+    with col2:
+        if airport_idx in G_analisis.nodes():
+            # Crear subgrafo con vecinos
+            neighbors = list(G_analisis.neighbors(airport_idx))
+            subgraph_nodes = [airport_idx] + neighbors
+            G_sub = G_analisis.subgraph(subgraph_nodes).copy()
+            
+            # Crear mapa
+            edges_list = list(G_sub.edges())
+            fig = create_map_figure(
+                G_sub,
+                nodes_subset=subgraph_nodes,
+                edges_to_draw=edges_list,
+                origin_node=airport_idx,
+                mapbox_style=map_style_analisis
+            )
+        else:
+            fig = create_map_figure(G_analisis, mapbox_style=map_style_analisis)
+        
+        st.plotly_chart(fig, use_container_width=True)
 
-# Callback para Vista General
-@app.callback(
-    Output('map-general', 'figure'),
-    [Input('layer-type-general', 'value'),
-     Input('layer-select-general', 'value'),
-     Input('map-style-general', 'value')]
-)
-def update_general_map(layer_type, layer_id, map_style):
-    if layer_type == 'aggregated':
-        G = G_agg
-    else:
-        G = layer_graphs[layer_id]
+# ============================================================================
+# PESTAÑA 3: CONEXIONES
+# ============================================================================
+
+with tab3:
+    st.header("Mapa de Rutas")
+    
+    col1, col2 = st.columns([1, 3])
+    
+    with col1:
+        st.subheader("Configuración")
+        
+        layer_type_conexiones = st.radio(
+            "Tipo de red:",
+            options=['aggregated', 'layer'],
+            format_func=lambda x: 'Agregada (todas las aerolíneas)' if x == 'aggregated' else 'Por aerolínea individual',
+            key='layer_type_conexiones'
+        )
+        
+        if layer_type_conexiones == 'layer':
+            layer_select_conexiones = st.selectbox(
+                "Seleccionar aerolínea:",
+                options=range(1, num_layers + 1),
+                format_func=lambda x: layers.iloc[x-1]['nodeLabel'],
+                key='layer_select_conexiones'
+            )
+        
+        # Selectores de aeropuertos
+        airport_options = [(row['nodeLabel'], f"{row['nodeLabel']} - {row['airportName']}") 
+                          for _, row in nodes.iterrows()]
+        
+        airport_origin = st.selectbox(
+            "Aeropuerto de origen:",
+            options=[x[0] for x in airport_options],
+            format_func=lambda x: next(y[1] for y in airport_options if y[0] == x),
+            key='airport_origin_conexiones'
+        )
+        
+        airport_dest = st.selectbox(
+            "Aeropuerto de destino:",
+            options=[x[0] for x in airport_options],
+            format_func=lambda x: next(y[1] for y in airport_options if y[0] == x),
+            index=1 if len(airport_options) > 1 else 0,
+            key='airport_dest_conexiones'
+        )
+        
+        st.markdown("---")
+        st.subheader("Info del Trayecto")
+        
+        # Seleccionar grafo
+        if layer_type_conexiones == 'aggregated':
+            G_conexiones = G_agg
+        else:
+            G_conexiones = layer_graphs[layer_select_conexiones]
+        
+        # Encontrar índices
+        origin_idx = nodes[nodes['nodeLabel'] == airport_origin].index[0]
+        dest_idx = nodes[nodes['nodeLabel'] == airport_dest].index[0]
+        
+        # Calcular camino más corto
+        try:
+            path = nx.shortest_path(G_conexiones, origin_idx, dest_idx)
+            path_edges = [(path[i], path[i+1]) for i in range(len(path)-1)]
+            path_layers = get_path_layers(path, edges)
+            
+            # Mostrar info
+            airport_names = [G_conexiones.nodes[n]['airport_name'] for n in path]
+            st.markdown("**Ruta:**")
+            st.write(" → ".join(airport_names))
+            
+            st.markdown("---")
+            st.markdown("**Trayectos por aerolínea:**")
+            for i, layer in enumerate(path_layers):
+                if layer is not None:
+                    layer_name = layers.iloc[layer-1]['nodeLabel']
+                    st.text(f"Trayecto {i+1}: {layer_name}")
+            
+            path_found = True
+        except nx.NetworkXNoPath:
+            st.warning("No hay ruta disponible entre estos aeropuertos")
+            path_found = False
+        
+        st.markdown("---")
+        st.subheader("Estilo de Mapa")
+        map_style_conexiones = st.selectbox(
+            "Seleccionar estilo:",
+            options=['CartoDB.Positron', 'Esri.WorldImagery', 'OpenStreetMap', 'Stadia.AlidadeSmooth'],
+            format_func=lambda x: {
+                'CartoDB.Positron': 'Minimalista',
+                'Esri.WorldImagery': 'Satélite',
+                'OpenStreetMap': 'Callejero',
+                'Stadia.AlidadeSmooth': 'Suave'
+            }[x],
+            key='map_style_conexiones'
+        )
+    
+    with col2:
+        if path_found:
+            fig = create_map_figure(
+                G_conexiones,
+                nodes_subset=path,
+                path_edges=path_edges,
+                origin_node=origin_idx,
+                dest_node=dest_idx,
+                mapbox_style=map_style_conexiones
+            )
+        else:
+            fig = create_map_figure(
+                G_conexiones,
+                nodes_subset=[origin_idx, dest_idx],
+                origin_node=origin_idx,
+                dest_node=dest_idx,
+                mapbox_style=map_style_conexiones
+            )
+        
+        st.plotly_chart(fig, use_container_width=True)
+
+# ============================================================================
+# PESTAÑA 4: PAGERANK
+# ============================================================================
+
+with tab4:
+    st.header("Visualización de PageRank por Aerolínea")
+    
+    col1, col2 = st.columns([1, 3])
+    
+    with col1:
+        st.subheader("Configuración")
+        
+        layer_select_pagerank = st.selectbox(
+            "Seleccionar aerolínea:",
+            options=range(1, num_layers + 1),
+            format_func=lambda x: layers.iloc[x-1]['nodeLabel'],
+            key='layer_select_pagerank'
+        )
+        
+        st.markdown("---")
+        st.subheader("Estadísticas de PageRank")
+        
+        # Obtener grafo y calcular PageRank
+        G_pagerank = layer_graphs[layer_select_pagerank]
+        adj_matrix = adjacency_matrices[layer_select_pagerank]
+        
         # Filtrar nodos sin conexiones
-        nodes_with_edges = [n for n in G.nodes() if G.degree(n) > 0]
-        G = G.subgraph(nodes_with_edges).copy()
-    
-    fig = create_map_figure(G, mapbox_style=map_style)
-    return fig
-
-
-# Callback para Análisis de Red
-@app.callback(
-    [Output('map-analisis', 'figure'),
-     Output('stats-analisis', 'children'),
-     Output('airport-info-analisis', 'children')],
-    [Input('layer-type-analisis', 'value'),
-     Input('layer-select-analisis', 'value'),
-     Input('airport-select-analisis', 'value'),
-     Input('map-style-analisis', 'value')]
-)
-def update_analisis(layer_type, layer_id, airport_code, map_style):
-    # Seleccionar grafo
-    if layer_type == 'aggregated':
-        G = G_agg
-    else:
-        G = layer_graphs[layer_id]
-    
-    # Encontrar índice del aeropuerto
-    airport_idx = nodes[nodes['nodeLabel'] == airport_code].index[0]
-    
-    # Estadísticas del grafo completo
-    stats_text = (f"Nodos totales: {G.number_of_nodes()}\n"
-                  f"Conexiones totales: {G.number_of_edges()}\n"
-                  f"Densidad: {nx.density(G):.4f}\n"
-                  f"Componentes conectados: {nx.number_connected_components(G)}")
-    
-    # Info del aeropuerto
-    if airport_idx in G.nodes():
-        airport_info = (f"Código: {airport_code}\n"
-                       f"Nombre: {G.nodes[airport_idx]['airport_name']}\n"
-                       f"Ciudad: {G.nodes[airport_idx]['city']}\n"
-                       f"Conexiones directas: {G.degree(airport_idx)}")
+        nodes_with_edges = [n for n in G_pagerank.nodes() if G_pagerank.degree(n) > 0]
+        G_sub = G_pagerank.subgraph(nodes_with_edges).copy()
         
-        # Crear subgrafo con vecinos
-        neighbors = list(G.neighbors(airport_idx))
-        subgraph_nodes = [airport_idx] + neighbors
-        G_sub = G.subgraph(subgraph_nodes).copy()
+        # Calcular PageRank
+        pr = calculate_pagerank(adj_matrix)
+        pr_filtered = pr[nodes_with_edges]
         
+        st.text(f"Nodos con conexiones: {len(nodes_with_edges)}")
+        st.text(f"Conexiones totales: {G_sub.number_of_edges()}")
+        st.text(f"PageRank promedio: {pr_filtered.mean():.5f}")
+        st.text(f"PageRank máximo: {pr_filtered.max():.5f}")
+        
+        max_pr_node = nodes_with_edges[np.argmax(pr_filtered)]
+        st.text(f"Nodo más importante: {G_sub.nodes[max_pr_node]['label']}")
+        
+        st.markdown("---")
+        st.subheader("Estilo de Mapa")
+        map_style_pagerank = st.selectbox(
+            "Seleccionar estilo:",
+            options=['CartoDB.Positron', 'Esri.WorldImagery', 'OpenStreetMap', 'Stadia.AlidadeSmooth'],
+            format_func=lambda x: {
+                'CartoDB.Positron': 'Minimalista',
+                'Esri.WorldImagery': 'Satélite',
+                'OpenStreetMap': 'Callejero',
+                'Stadia.AlidadeSmooth': 'Suave'
+            }[x],
+            key='map_style_pagerank'
+        )
+    
+    with col2:
         # Crear mapa
-        edges_list = list(G_sub.edges())
         fig = create_map_figure(
             G_sub,
-            nodes_subset=subgraph_nodes,
-            edges_to_draw=edges_list,
-            origin_node=airport_idx,
-            mapbox_style=map_style
-        )
-    else:
-        airport_info = "Aeropuerto no encontrado en esta red"
-        fig = create_map_figure(G, mapbox_style=map_style)
-    
-    return fig, stats_text, airport_info
-
-
-# Callback para Conexiones
-@app.callback(
-    [Output('map-conexiones', 'figure'),
-     Output('path-info-conexiones', 'children')],
-    [Input('layer-type-conexiones', 'value'),
-     Input('layer-select-conexiones', 'value'),
-     Input('airport-origin-conexiones', 'value'),
-     Input('airport-dest-conexiones', 'value'),
-     Input('map-style-conexiones', 'value')]
-)
-def update_conexiones(layer_type, layer_id, origin_code, dest_code, map_style):
-    # Seleccionar grafo
-    if layer_type == 'aggregated':
-        G = G_agg
-    else:
-        G = layer_graphs[layer_id]
-    
-    # Encontrar índices
-    origin_idx = nodes[nodes['nodeLabel'] == origin_code].index[0]
-    dest_idx = nodes[nodes['nodeLabel'] == dest_code].index[0]
-    
-    # Calcular camino más corto
-    try:
-        path = nx.shortest_path(G, origin_idx, dest_idx)
-        path_edges = [(path[i], path[i+1]) for i in range(len(path)-1)]
-        
-        # Obtener capas usadas
-        path_layers = get_path_layers(path, edges)
-        
-        # Info del trayecto
-        airport_names = [G.nodes[n]['airport_name'] for n in path]
-        path_info = [
-            html.Div([
-                html.P(" → ".join(airport_names), style={'fontWeight': 'bold'}),
-                html.Hr()
-            ])
-        ]
-        
-        for i, layer in enumerate(path_layers):
-            if layer is not None:
-                layer_name = layers.iloc[layer-1]['nodeLabel']
-                path_info.append(
-                    html.P(f"Trayecto {i+1}: {layer_name}")
-                )
-        
-        # Crear mapa
-        fig = create_map_figure(
-            G,
-            nodes_subset=path,
-            path_edges=path_edges,
-            origin_node=origin_idx,
-            dest_node=dest_idx,
-            mapbox_style=map_style
+            nodes_subset=nodes_with_edges,
+            edges_to_draw=list(G_sub.edges()),
+            pagerank_values=pr,
+            mapbox_style=map_style_pagerank
         )
         
-    except nx.NetworkXNoPath:
-        path_info = [html.P("No hay ruta disponible entre estos aeropuertos")]
-        fig = create_map_figure(
-            G,
-            nodes_subset=[origin_idx, dest_idx],
-            origin_node=origin_idx,
-            dest_node=dest_idx,
-            mapbox_style=map_style
-        )
-    
-    return fig, path_info
-
-
-# Callback para PageRank
-@app.callback(
-    [Output('map-pagerank', 'figure'),
-     Output('stats-pagerank', 'children')],
-    [Input('layer-select-pagerank', 'value'),
-     Input('map-style-pagerank', 'value')]
-)
-def update_pagerank(layer_id, map_style):
-    # Obtener grafo y matriz de adyacencia
-    G = layer_graphs[layer_id]
-    adj_matrix = adjacency_matrices[layer_id]
-    
-    # Filtrar nodos sin conexiones
-    nodes_with_edges = [n for n in G.nodes() if G.degree(n) > 0]
-    G_sub = G.subgraph(nodes_with_edges).copy()
-    
-    # Calcular PageRank
-    pr = calculate_pagerank(adj_matrix)
-    pr_filtered = pr[nodes_with_edges]
-    
-    # Estadísticas
-    stats_text = (f"Nodos con conexiones: {len(nodes_with_edges)}\n"
-                  f"Conexiones totales: {G_sub.number_of_edges()}\n"
-                  f"PageRank promedio: {pr_filtered.mean():.5f}\n"
-                  f"PageRank máximo: {pr_filtered.max():.5f}\n"
-                  f"Nodo más importante: {G_sub.nodes[nodes_with_edges[np.argmax(pr_filtered)]]['label']}")
-    
-    # Crear mapa
-    fig = create_map_figure(
-        G_sub,
-        nodes_subset=nodes_with_edges,
-        edges_to_draw=list(G_sub.edges()),
-        pagerank_values=pr,
-        mapbox_style=map_style
-    )
-    
-    return fig, stats_text
-
+        st.plotly_chart(fig, use_container_width=True)
 
 # ============================================================================
-# EJECUTAR APLICACIÓN
+# FOOTER
 # ============================================================================
 
-if __name__ == '__main__':
-    app.run_server(debug=True, port=8050)
+st.markdown("---")
+st.markdown(
+    """
+    <div style='text-align: center'>
+        <p>Dashboard de Red de Aeropuertos Europeos | Desarrollado con Streamlit</p>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
