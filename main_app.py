@@ -6,11 +6,27 @@ Implementado con Streamlit
 import streamlit as st
 import pandas as pd
 import numpy as np
-import networkx as nx
-from scipy.sparse import csr_matrix
-import plotly.graph_objects as go
 import warnings
 warnings.filterwarnings('ignore')
+
+# Verificar e importar dependencias críticas
+try:
+    import networkx as nx
+except ImportError:
+    st.error("❌ NetworkX no está instalado. Ejecuta: pip install networkx")
+    st.stop()
+
+try:
+    from scipy.sparse import csr_matrix
+except ImportError:
+    st.error("❌ SciPy no está instalado. Ejecuta: pip install scipy")
+    st.stop()
+
+try:
+    import plotly.graph_objects as go
+except ImportError:
+    st.error("❌ Plotly no está instalado. Ejecuta: pip install plotly")
+    st.stop()
 
 # ============================================================================
 # CONFIGURACIÓN DE LA PÁGINA
